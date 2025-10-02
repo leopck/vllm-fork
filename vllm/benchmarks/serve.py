@@ -1201,6 +1201,26 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
+    
+    tools = None
+    tool_choice = None
+    if args.dataset_name == "tool_calling" and len(input_requests) > 0:
+        first_request = input_requests[0]
+        if (first_request.multi_modal_data and 
+            isinstance(first_request.multi_modal_data, dict)):
+            tools = first_request.multi_modal_data.get("tools")
+            tool_choice = first_request.multi_modal_data.get("tool_choice")
+            if tools:
+                print(f"\nTool calling enabled with {len(tools)} tools")
+                if hasattr(args, 'tool_subset') and args.tool_subset:
+                    print(f"Using tool subset: {', '.join(args.tool_subset)}\n")
+                
+                # Remove tools from multi_modal_data to avoid passing them twice
+                for request in input_requests:
+                    if (request.multi_modal_data and 
+                        isinstance(request.multi_modal_data, dict)):
+                        request.multi_modal_data = None
+    
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -1221,6 +1241,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+
+    if tools:
+        sampling_params["tools"] = tools
+        if tool_choice:
+            sampling_params["tool_choice"] = tool_choice
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
@@ -1288,6 +1313,17 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         result_json["ramp_up_strategy"] = args.ramp_up_strategy
         result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
         result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
+
+    if args.dataset_name == "tool_calling":
+        result_json["dataset_type"] = "tool_calling"
+        if hasattr(args, 'tool_calling_input_tokens'):
+            result_json["tool_calling_input_tokens"] = args.tool_calling_input_tokens
+        if hasattr(args, 'tool_calling_output_tokens'):
+            result_json["tool_calling_output_tokens"] = args.tool_calling_output_tokens
+        if hasattr(args, 'tool_subset') and args.tool_subset:
+            result_json["tool_subset"] = args.tool_subset
+        if tools:
+            result_json["num_tools"] = len(tools)
 
     # Merge with benchmark result
     result_json = {**result_json, **benchmark_result}
