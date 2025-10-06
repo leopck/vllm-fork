@@ -1144,7 +1144,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
-
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
         if args.request_rate != float("inf"):
@@ -1170,7 +1169,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     model_name = args.served_model_name
     tokenizer_id = args.tokenizer if args.tokenizer is not None else args.model
     tokenizer_mode = args.tokenizer_mode
-
     if args.base_url is not None:
         api_url = f"{args.base_url}{args.endpoint}"
         base_url = f"{args.base_url}"
@@ -1199,28 +1197,24 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required.")
 
+    # --- TOOL CALLING SPECIAL HANDLING ---
+    if args.dataset_name == "tool_calling":
+        # Force correct backend and endpoint
+        if args.backend != "openai-chat":
+            print("⚠️  Forcing backend to 'openai-chat' for tool calling dataset.")
+            args.backend = "openai-chat"
+        if args.endpoint != "/v1/chat/completions":
+            print("⚠️  Forcing endpoint to '/v1/chat/completions' for tool calling.")
+            args.endpoint = "/v1/chat/completions"
+            # Rebuild API URL
+            if args.base_url is not None:
+                api_url = f"{args.base_url}{args.endpoint}"
+            else:
+                api_url = f"http://{args.host}:{args.port}{args.endpoint}"
+
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
-    
-    tools = None
-    tool_choice = None
-    if args.dataset_name == "tool_calling" and len(input_requests) > 0:
-        first_request = input_requests[0]
-        if (first_request.multi_modal_data and 
-            isinstance(first_request.multi_modal_data, dict)):
-            tools = first_request.multi_modal_data.get("tools")
-            tool_choice = first_request.multi_modal_data.get("tool_choice")
-            if tools:
-                print(f"\nTool calling enabled with {len(tools)} tools")
-                if hasattr(args, 'tool_subset') and args.tool_subset:
-                    print(f"Using tool subset: {', '.join(args.tool_subset)}\n")
-                
-                # Remove tools from multi_modal_data to avoid passing them twice
-                for request in input_requests:
-                    if (request.multi_modal_data and 
-                        isinstance(request.multi_modal_data, dict)):
-                        request.multi_modal_data = None
-    
+
     goodput_config_dict = check_goodput_args(args)
 
     # Collect the sampling parameters.
@@ -1242,10 +1236,18 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     if "temperature" not in sampling_params:
         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
 
-    if tools:
+    # --- TOOL CALLING: Inject tools into sampling_params (→ extra_body) ---
+    if args.dataset_name == "tool_calling":
+        from vllm.benchmarks.datasets import ToolCallingDataset
+        dataset = ToolCallingDataset(dataset_path=args.dataset_path, random_seed=args.seed)
+        tools = dataset.get_comprehensive_tools()
+        if getattr(args, 'tool_subset', None):
+            tools = [t for t in tools if t["function"]["name"] in args.tool_subset]
         sampling_params["tools"] = tools
-        if tool_choice:
-            sampling_params["tool_choice"] = tool_choice
+        sampling_params["tool_choice"] = "required"
+        print(f"\n✅ Tool calling enabled with {len(tools)} tools")
+        if args.tool_subset:
+            print(f"✅ Using tool subset: {', '.join(args.tool_subset)}\n")
 
     # Avoid GC processing "static" data - reduce pause times.
     gc.collect()
@@ -1282,11 +1284,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Save config and results to json
     result_json: dict[str, Any] = {}
-
     # Setup
     current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
     result_json["date"] = current_dt
-    result_json["endpoint_type"] = args.backend # for backward compatibility
+    result_json["endpoint_type"] = args.backend
     result_json["backend"] = args.backend
     result_json["label"] = label
     result_json["model_id"] = model_id
@@ -1308,22 +1309,19 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                                    < float("inf") else "inf")
     result_json["burstiness"] = args.burstiness
     result_json["max_concurrency"] = args.max_concurrency
-
     if args.ramp_up_strategy is not None:
         result_json["ramp_up_strategy"] = args.ramp_up_strategy
         result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
         result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
 
+    # Tool calling metadata
     if args.dataset_name == "tool_calling":
         result_json["dataset_type"] = "tool_calling"
-        if hasattr(args, 'tool_calling_input_tokens'):
-            result_json["tool_calling_input_tokens"] = args.tool_calling_input_tokens
-        if hasattr(args, 'tool_calling_output_tokens'):
-            result_json["tool_calling_output_tokens"] = args.tool_calling_output_tokens
-        if hasattr(args, 'tool_subset') and args.tool_subset:
+        result_json["tool_calling_input_tokens"] = args.tool_calling_input_tokens
+        result_json["tool_calling_output_tokens"] = args.tool_calling_output_tokens
+        if args.tool_subset:
             result_json["tool_subset"] = args.tool_subset
-        if tools:
-            result_json["num_tools"] = len(tools)
+        result_json["num_tools"] = len(tools)
 
     # Merge with benchmark result
     result_json = {**result_json, **benchmark_result}
@@ -1338,21 +1336,17 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 "generated_texts",
                 "errors",
         ]:
-            if field in result_json:
-                del result_json[field]
-            if field in benchmark_result:
-                del benchmark_result[field]
+            result_json.pop(field, None)
 
-        # Save to file
     if args.save_result or args.append_result:
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
         label = label or args.backend
         if args.ramp_up_strategy is not None:
-            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"
         else:
-            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
@@ -1361,7 +1355,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         with open(file_name,
                   mode="a+" if args.append_result else "w",
                   encoding="utf-8") as outfile:
-            # Append a newline.
             if args.append_result and outfile.tell() != 0:
                 outfile.write("\n")
             json.dump(result_json, outfile)

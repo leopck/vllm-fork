@@ -2232,16 +2232,25 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         for i in range(num_requests):
             base_prompt = prompts[i % len(prompts)]
             variation_suffix = f"\n\nRequest ID: {i+1}. Please ensure your response is detailed and comprehensive."
-            prompt_text = base_prompt + variation_suffix
-            
+            user_content = base_prompt + variation_suffix
+
+            # Format as chat using tokenizer's chat template
+            if hasattr(tokenizer, 'apply_chat_template') and tokenizer.chat_template:
+                chat_messages = [{"role": "user", "content": user_content}]
+                prompt_text = tokenizer.apply_chat_template(
+                    chat_messages, tokenize=False, add_generation_prompt=True
+                )
+            else:
+                # Fallback: basic chat format (not ideal, but works)
+                prompt_text = f"USER: {user_content}\nASSISTANT:"
 
             prompt_len = len(tokenizer(prompt_text, add_special_tokens=False).input_ids)
-            
+
             request = SampleRequest(
                 prompt=prompt_text,
                 prompt_len=prompt_len,
                 expected_output_len=output_tokens,
-                multi_modal_data={"tools": tools, "tool_choice": "required"}
+                multi_modal_data=None  # tools handled via sampling_params
             )
             requests.append(request)
         

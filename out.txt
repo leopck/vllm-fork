@@ -1,0 +1,762 @@
+diff --git a/vllm/benchmarks/datasets.py b/vllm/benchmarks/datasets.py
+index 807e543dc..ec65e3d58 100644
+--- a/vllm/benchmarks/datasets.py
++++ b/vllm/benchmarks/datasets.py
+@@ -1128,7 +1128,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
+         action=_ValidateDatasetArgs,
+         choices=[
+             "sharegpt", "burstgpt", "sonnet", "random", "random-mm", "hf",
+-            "custom", "prefix_repetition", "spec_bench"
++            "custom", "prefix_repetition", "spec_bench", "tool_calling"
+         ],
+         help="Name of the dataset to benchmark on.",
+     )
+@@ -1317,6 +1317,28 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
+         ),
+     )
+ 
++    tool_calling_group = parser.add_argument_group("tool calling dataset options")
++    tool_calling_group.add_argument(
++        "--tool-calling-input-tokens",
++        type=int,
++        default=122880,
++        help="Target input token length for tool calling requests.",
++    )
++    tool_calling_group.add_argument(
++        "--tool-calling-output-tokens", 
++        type=int,
++        default=8192,
++        help="Max output token length for tool calling requests.",
++    )
++    tool_calling_group.add_argument(
++        "--tool-subset",
++        nargs="+",
++        help="Specific tools to include in requests (default: all tools)",
++        choices=["get_current_weather", "search_web", "calculate_math", "send_email",
++                "create_calendar_event", "get_stock_price", "translate_text", "execute_code",
++                "read_file", "analyze_sentiment", "get_news"]
++    )
++
+     def _parse_mm_bucket_config(v: object) -> dict[tuple[int, int, int], float]:
+         # If already a dict (e.g., programmatic call), normalize keys
+         def normalize(d: dict) -> dict[tuple[int, int, int], float]:
+@@ -1440,6 +1462,20 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
+             no_oversample=args.no_oversample,
+         )
+ 
++    elif args.dataset_name == "tool_calling":
++        dataset = ToolCallingDataset(
++            dataset_path=args.dataset_path, 
++            random_seed=args.seed
++        )
++        input_requests = dataset.sample(
++            num_requests=args.num_prompts,
++            tokenizer=tokenizer,
++            input_tokens=args.tool_calling_input_tokens,
++            output_tokens=args.tool_calling_output_tokens,
++            tool_subset=args.tool_subset,
++        )
++        return input_requests
++
+     elif args.dataset_name == "sonnet":
+         dataset = SonnetDataset(dataset_path=args.dataset_path)
+         # For the "sonnet" dataset, formatting depends on the backend.
+@@ -1667,6 +1703,549 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
+ 
+     return input_requests
+ 
++# -----------------------------------------------------------------------------
++# Tooling Dataset
++# -----------------------------------------------------------------------------
++class ToolCallingDataset(BenchmarkDataset):
++    """Dataset for benchmarking tool calling capabilities with configurable input/output lengths.
++    
++    This dataset generates synthetic tool calling prompts with long context to test
++    model performance on tool use tasks with extended input sequences.
++    """
++    
++    def __init__(self, dataset_path: Optional[str] = None, random_seed: int = 0):
++        """Initialize the ToolCallingDataset.
++        
++        Args:
++            dataset_path: Optional path (unused for synthetic generation)
++            random_seed: Seed for reproducible generation
++        """
++        super().__init__(dataset_path=dataset_path, random_seed=random_seed)
++        
++    def load_data(self):
++        """Load data - no-op for synthetic dataset."""
++        pass
++        
++    def get_comprehensive_tools(self):
++        """Return comprehensive set of tool calling functions.
++        
++        Returns:
++            List of tool definitions in OpenAI function calling format.
++        """
++        return [
++            {
++                "type": "function",
++                "function": {
++                    "name": "get_current_weather",
++                    "description": "Get comprehensive current weather information for a given location, including temperature, humidity, pressure, wind conditions, visibility, and forecast data",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "location": {
++                                "type": "string",
++                                "description": "The city and state or city and country, e.g. San Francisco, CA or London, UK"
++                            },
++                            "unit": {
++                                "type": "string",
++                                "enum": ["celsius", "fahrenheit"],
++                                "description": "Temperature unit preference"
++                            },
++                            "include_forecast": {
++                                "type": "boolean",
++                                "description": "Whether to include extended forecast information",
++                                "default": True
++                            }
++                        },
++                        "required": ["location"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "search_web",
++                    "description": "Search the internet for current information on any topic",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "query": {
++                                "type": "string",
++                                "description": "The search query to execute"
++                            },
++                            "num_results": {
++                                "type": "integer",
++                                "description": "Number of results to return",
++                                "default": 10,
++                                "minimum": 1,
++                                "maximum": 20
++                            },
++                            "language": {
++                                "type": "string",
++                                "description": "Language for search results",
++                                "default": "en"
++                            }
++                        },
++                        "required": ["query"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "calculate_math",
++                    "description": "Perform complex mathematical calculations including algebra, calculus, statistics, and more",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "expression": {
++                                "type": "string",
++                                "description": "Mathematical expression to evaluate"
++                            },
++                            "operation_type": {
++                                "type": "string",
++                                "enum": ["arithmetic", "algebra", "calculus", "statistics", "trigonometry", "linear_algebra"],
++                                "description": "Type of mathematical operation"
++                            },
++                            "precision": {
++                                "type": "integer",
++                                "description": "Number of decimal places for results",
++                                "default": 10
++                            }
++                        },
++                        "required": ["expression"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "send_email",
++                    "description": "Send an email to specified recipients with subject and body",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "to": {
++                                "type": "array",
++                                "items": {"type": "string"},
++                                "description": "List of recipient email addresses"
++                            },
++                            "subject": {
++                                "type": "string",
++                                "description": "Email subject line"
++                            },
++                            "body": {
++                                "type": "string",
++                                "description": "Email body content"
++                            },
++                            "cc": {
++                                "type": "array",
++                                "items": {"type": "string"},
++                                "description": "List of CC recipient email addresses"
++                            },
++                            "priority": {
++                                "type": "string",
++                                "enum": ["low", "normal", "high"],
++                                "default": "normal"
++                            }
++                        },
++                        "required": ["to", "subject", "body"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "create_calendar_event",
++                    "description": "Create a new calendar event with specified details",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "title": {
++                                "type": "string",
++                                "description": "Event title"
++                            },
++                            "start_time": {
++                                "type": "string",
++                                "description": "Start time in ISO 8601 format"
++                            },
++                            "end_time": {
++                                "type": "string",
++                                "description": "End time in ISO 8601 format"
++                            },
++                            "description": {
++                                "type": "string",
++                                "description": "Event description"
++                            },
++                            "location": {
++                                "type": "string",
++                                "description": "Event location"
++                            },
++                            "attendees": {
++                                "type": "array",
++                                "items": {"type": "string"},
++                                "description": "List of attendee email addresses"
++                            },
++                            "reminder_minutes": {
++                                "type": "integer",
++                                "description": "Minutes before event to send reminder",
++                                "default": 15
++                            }
++                        },
++                        "required": ["title", "start_time", "end_time"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "get_stock_price",
++                    "description": "Get current stock price and financial information for a given ticker symbol",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "symbol": {
++                                "type": "string",
++                                "description": "Stock ticker symbol (e.g., AAPL, GOOGL, TSLA)"
++                            },
++                            "include_historical": {
++                                "type": "boolean",
++                                "description": "Include historical price data",
++                                "default": False
++                            },
++                            "period": {
++                                "type": "string",
++                                "enum": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y"],
++                                "description": "Time period for historical data",
++                                "default": "1mo"
++                            }
++                        },
++                        "required": ["symbol"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "translate_text",
++                    "description": "Translate text from one language to another",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "text": {
++                                "type": "string",
++                                "description": "Text to translate"
++                            },
++                            "source_language": {
++                                "type": "string",
++                                "description": "Source language code (e.g., en, es, fr, de)"
++                            },
++                            "target_language": {
++                                "type": "string",
++                                "description": "Target language code (e.g., en, es, fr, de)"
++                            },
++                            "include_pronunciation": {
++                                "type": "boolean",
++                                "description": "Include pronunciation guide",
++                                "default": False
++                            }
++                        },
++                        "required": ["text", "target_language"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "execute_code",
++                    "description": "Execute code in various programming languages safely in a sandboxed environment",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "code": {
++                                "type": "string",
++                                "description": "Code to execute"
++                            },
++                            "language": {
++                                "type": "string",
++                                "enum": ["python", "javascript", "bash", "sql", "r"],
++                                "description": "Programming language"
++                            },
++                            "timeout": {
++                                "type": "integer",
++                                "description": "Execution timeout in seconds",
++                                "default": 30
++                            },
++                            "include_output": {
++                                "type": "boolean",
++                                "description": "Return execution output",
++                                "default": True
++                            }
++                        },
++                        "required": ["code", "language"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "read_file",
++                    "description": "Read and analyze contents of various file formats",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "file_path": {
++                                "type": "string",
++                                "description": "Path to the file to read"
++                            },
++                            "file_type": {
++                                "type": "string",
++                                "enum": ["text", "csv", "json", "xml", "pdf", "docx", "xlsx"],
++                                "description": "Type of file to read"
++                            },
++                            "encoding": {
++                                "type": "string",
++                                "description": "File encoding",
++                                "default": "utf-8"
++                            },
++                            "parse_structure": {
++                                "type": "boolean",
++                                "description": "Parse and return structured data",
++                                "default": True
++                            }
++                        },
++                        "required": ["file_path"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "analyze_sentiment",
++                    "description": "Analyze sentiment and emotions in text content",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "text": {
++                                "type": "string",
++                                "description": "Text content to analyze"
++                            },
++                            "analysis_type": {
++                                "type": "string",
++                                "enum": ["sentiment", "emotion", "both"],
++                                "description": "Type of analysis to perform",
++                                "default": "both"
++                            },
++                            "confidence_threshold": {
++                                "type": "number",
++                                "description": "Minimum confidence score for results",
++                                "default": 0.5,
++                                "minimum": 0.0,
++                                "maximum": 1.0
++                            }
++                        },
++                        "required": ["text"]
++                    }
++                }
++            },
++            {
++                "type": "function",
++                "function": {
++                    "name": "get_news",
++                    "description": "Get latest news articles on specified topics or from specific sources",
++                    "parameters": {
++                        "type": "object",
++                        "properties": {
++                            "topic": {
++                                "type": "string",
++                                "description": "News topic or keyword to search for"
++                            },
++                            "category": {
++                                "type": "string",
++                                "enum": ["technology", "business", "sports", "entertainment", "health", "science", "politics"],
++                                "description": "News category"
++                            },
++                            "source": {
++                                "type": "string",
++                                "description": "Specific news source"
++                            },
++                            "language": {
++                                "type": "string",
++                                "description": "Language for news articles",
++                                "default": "en"
++                            },
++                            "max_articles": {
++                                "type": "integer",
++                                "description": "Maximum number of articles to return",
++                                "default": 10,
++                                "minimum": 1,
++                                "maximum": 50
++                            }
++                        },
++                        "required": ["topic"]
++                    }
++                }
++            }
++        ]
++
++    def generate_long_context(self, target_tokens: int) -> str:
++        """Generate long context text to approximate target token count.
++        
++        Args:
++            target_tokens: Approximate number of tokens to generate
++            
++        Returns:
++            Long context string
++        """
++        # Rough approximation: 4 characters per token for English text
++        target_chars = target_tokens * 4
++        
++        base_text = """The field of artificial intelligence has undergone remarkable transformations over the past decade, fundamentally reshaping how we understand machine learning, natural language processing, and automated reasoning systems. Large language models have emerged as particularly significant developments, demonstrating unprecedented capabilities in text generation, comprehension, and complex reasoning tasks across diverse domains including scientific research, creative writing, code generation, and analytical problem solving.
++
++These sophisticated neural networks, trained on vast corpora of textual data, exhibit emergent behaviors that extend far beyond simple pattern matching or statistical correlation. They demonstrate nuanced understanding of context, semantic relationships, pragmatic implications, and even subtle aspects of human communication such as humor, irony, and cultural references. The architectural innovations underlying these systems, including transformer mechanisms, attention layers, and sophisticated optimization techniques, have enabled models to process and generate coherent, contextually appropriate responses across extended conversations and complex multi-turn interactions.
++
++The implications of these technological advances extend across numerous sectors and applications. In healthcare, AI systems are revolutionizing diagnostic procedures, drug discovery processes, and personalized treatment recommendations. Educational institutions are exploring adaptive learning platforms that can customize instruction to individual student needs and learning patterns. Financial services are implementing automated risk assessment, fraud detection, and algorithmic trading systems. Legal professionals are utilizing AI for document review, case law research, and contract analysis. Scientific researchers are leveraging machine learning for data analysis, hypothesis generation, and experimental design optimization.
++
++However, these rapid developments also raise important questions about ethics, safety, and societal impact. Issues of bias in training data and model outputs, concerns about job displacement and economic disruption, questions of intellectual property and content attribution, and challenges related to misinformation and deepfake generation require careful consideration and proactive policy responses. The development of robust governance frameworks, ethical guidelines, and safety protocols becomes increasingly critical as these systems become more powerful and widely deployed.
++
++Furthermore, the computational requirements for training and deploying large-scale AI models present significant challenges related to energy consumption, environmental impact, and accessibility. The concentration of advanced AI capabilities among a small number of well-resourced organizations raises concerns about technological inequality and the democratization of AI benefits. Research into more efficient architectures, federated learning approaches, and sustainable computing practices represents crucial areas for continued investigation and innovation.
++
++Looking toward the future, the trajectory of AI development suggests continued advancement in model capabilities, efficiency, and specialization. Multimodal systems that can process and generate combinations of text, images, audio, and video content are beginning to emerge. Reasoning capabilities are becoming more sophisticated, enabling AI systems to tackle complex mathematical problems, scientific inquiries, and strategic planning tasks. The integration of AI with robotics, autonomous vehicles, and Internet of Things devices promises to extend machine intelligence into physical world applications.
++
++The path forward requires collaboration among researchers, policymakers, industry leaders, and civil society organizations to ensure that AI development proceeds in ways that maximize benefits while minimizing risks. This includes investment in AI safety research, development of robust testing and evaluation methodologies, creation of inclusive stakeholder engagement processes, and establishment of international cooperation frameworks for addressing global challenges and opportunities presented by artificial intelligence technologies."""
++        
++        # Repeat and truncate to approximate target length
++        repetitions = max(1, target_chars // len(base_text))
++        extended_text = (base_text * repetitions)[:target_chars]
++        return extended_text
++
++    def create_tool_calling_prompts(self, input_tokens: int = 122880, output_tokens: int = 8192) -> list[str]:
++        """Create diverse tool calling prompts with long context.
++        
++        Args:
++            input_tokens: Target input token length
++            output_tokens: Expected output token length
++            
++        Returns:
++            List of prompt strings
++        """
++        long_context = self.generate_long_context(input_tokens - 1500)  # Reserve tokens for prompt structure
++        
++        prompts = [
++            f"""Given the following extensive context about AI and technology:
++
++{long_context}
++
++You are an advanced AI assistant with access to multiple tools. Based on the context above, please help me with a comprehensive weather analysis for Boston. Use your available tools to:
++1. Get current weather information for Boston
++2. Search for recent weather news in the Boston area  
++3. Calculate the temperature trend if applicable
++4. Translate key weather terms to Spanish for our international team
++
++Provide a thorough analysis demonstrating the full capabilities of your available tools.""",
++
++            f"""Context about artificial intelligence and technology:
++
++{long_context}
++
++As an AI assistant with tool access, I need you to help with market analysis. Please:
++1. Get the current stock price for AAPL
++2. Search for recent Apple news
++3. Calculate the percentage change if you have historical data
++4. Translate the summary to French
++5. Analyze the sentiment of recent news
++
++Use multiple tools to provide comprehensive market insights.""",
++
++            f"""Here's extensive background on AI developments:
++
++{long_context}
++
++Help me with a technical analysis task using your available tools:
++1. Execute Python code to calculate fibonacci numbers up to 100
++2. Search for recent developments in quantum computing
++3. Translate technical terms to German
++4. Analyze sentiment of quantum computing news
++5. Send a summary email to team@company.com
++
++Demonstrate your multi-tool capabilities for this complex request.""",
++
++            f"""Background context on technology trends:
++
++{long_context}
++
++I need assistance with a multi-faceted research project. Please use your tools to:
++1. Search for the latest developments in renewable energy
++2. Get weather data for San Francisco (for solar analysis)
++3. Calculate energy efficiency metrics using available data
++4. Translate findings to Japanese
++5. Analyze sentiment of renewable energy news
++6. Create a code snippet to visualize the data
++
++Provide comprehensive analysis using all relevant tools.""",
++
++            f"""Extensive context on AI and technological advancement:
++
++{long_context}
++
++Help me analyze global cryptocurrency trends using your tools:
++1. Search for Bitcoin price trends and news
++2. Calculate percentage changes in major cryptocurrencies  
++3. Get current market sentiment analysis
++4. Translate key findings to Spanish and Chinese
++5. Execute code to create a simple trend analysis
++6. Send summary to stakeholders@crypto-firm.com
++
++Use multiple tools to provide thorough cryptocurrency market analysis."""
++        ]
++        
++        return prompts
++
++    def sample(
++        self, 
++        tokenizer: PreTrainedTokenizerBase, 
++        num_requests: int,
++        input_tokens: int = 122880,
++        output_tokens: int = 8192,
++        tool_subset: Optional[list[str]] = None,
++        **kwargs
++    ) -> list[SampleRequest]:
++        """Sample tool calling requests with specified token lengths.
++        
++        Args:
++            tokenizer: The tokenizer to use
++            num_requests: Number of requests to generate
++            input_tokens: Target input token length (default: 122880)
++            output_tokens: Expected output token length (default: 8192)
++            tool_subset: Optional list of specific tool names to include
++            **kwargs: Additional arguments
++            
++        Returns:
++            List of SampleRequest objects
++        """
++        tools = self.get_comprehensive_tools()
++        if tool_subset:
++            tools = [tool for tool in tools if tool["function"]["name"] in tool_subset]
++        
++        prompts = self.create_tool_calling_prompts(input_tokens, output_tokens)
++        requests = []
++        
++        for i in range(num_requests):
++            base_prompt = prompts[i % len(prompts)]
++            variation_suffix = f"\n\nRequest ID: {i+1}. Please ensure your response is detailed and comprehensive."
++            prompt_text = base_prompt + variation_suffix
++            
++            # Keep as string - the request function converts it to messages
++            prompt_len = len(tokenizer(prompt_text, add_special_tokens=False).input_ids)
++            
++            request = SampleRequest(
++                prompt=prompt_text,  # STRING, not array
++                prompt_len=prompt_len,
++                expected_output_len=output_tokens,
++                multi_modal_data={"tools": tools, "tool_choice": "auto"}
++            )
++            requests.append(request)
++        
++        return requests
+ 
+ # -----------------------------------------------------------------------------
+ # Custom Dataset Implementation
+diff --git a/vllm/benchmarks/lib/endpoint_request_func.py b/vllm/benchmarks/lib/endpoint_request_func.py
+index 725b7df8b..29b50162c 100644
+--- a/vllm/benchmarks/lib/endpoint_request_func.py
++++ b/vllm/benchmarks/lib/endpoint_request_func.py
+@@ -122,6 +122,7 @@ async def async_request_openai_completions(
+         ("completions", "profile")
+     ), "OpenAI Completions API URL must end with 'completions' or 'profile'."
+ 
++    print("=========================== I'm inside completion instead")
+     payload = {
+         "model": request_func_input.model_name
+         if request_func_input.model_name else request_func_input.model,
+@@ -233,7 +234,10 @@ async def async_request_openai_chat_completions(
+     api_url = request_func_input.api_url
+     assert api_url.endswith(("chat/completions", "profile")), (
+         "OpenAI Chat Completions API URL must end with 'chat/completions'.")
+-
++    import json
++    print(f"\n=== FUNCTION CALLED ===")
++    print(f"API URL: {request_func_input.api_url}")
++    print("=" * 40)
+     content = [{"type": "text", "text": request_func_input.prompt}]
+     if request_func_input.multi_modal_content:
+         mm_content = request_func_input.multi_modal_content
+@@ -270,6 +274,21 @@ async def async_request_openai_chat_completions(
+         payload["ignore_eos"] = request_func_input.ignore_eos
+     if request_func_input.extra_body:
+         payload.update(request_func_input.extra_body)
++    print(f"\n=== DEBUG endpoint_request_func ===")
++    print(f"extra_body: {request_func_input.extra_body is not None}")
++    if request_func_input.extra_body:
++        print(f"extra_body keys: {list(request_func_input.extra_body.keys())}")
++    print(f"payload has tools: {'tools' in payload}")
++    print(f"payload keys: {list(payload.keys())}")
++    print("=" * 40 + "\n")
++    if "tools" in payload:
++        print(f"\n=== DEBUG: Request Payload ===")
++        print(f"Model: {payload['model']}")
++        print(f"Messages: {payload['messages']}")
++        print(f"Has tools: {len(payload.get('tools', []))} tools")
++        print(f"Tool choice: {payload.get('tool_choice')}")
++        print(f"First tool: {json.dumps(payload['tools'][0], indent=2) if payload.get('tools') else 'None'}")
++        print("=" * 40)
+     headers = {
+         "Content-Type": "application/json",
+         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+diff --git a/vllm/benchmarks/serve.py b/vllm/benchmarks/serve.py
+index a327e711c..73a25a30f 100644
+--- a/vllm/benchmarks/serve.py
++++ b/vllm/benchmarks/serve.py
+@@ -603,6 +603,13 @@ async def benchmark(
+     async for request, current_request_rate in get_request(
+             input_requests, request_rate, burstiness, ramp_up_strategy,
+             ramp_up_start_rps, ramp_up_end_rps):
++        if len(tasks) == 0:  # Only print the first request
++            print("\n=== DEBUG: First Request ===")
++            print(f"Prompt type: {type(request.prompt)}")
++            print(f"Prompt preview: {request.prompt[:200]}...")
++            print(f"Multi-modal data: {request.multi_modal_data}")
++            print(f"Extra body: {extra_body}")
++            print("===========================\n")
+         if ramp_up_strategy is not None:
+             current_int_rps = int(current_request_rate)
+             if current_int_rps > last_int_rps:
+@@ -1139,7 +1146,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
+ def main(args: argparse.Namespace) -> dict[str, Any]:
+     return asyncio.run(main_async(args))
+ 
+-
+ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
+     print(args)
+     random.seed(args.seed)
+@@ -1201,6 +1207,34 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
+ 
+     # Load the dataset.
+     input_requests = get_samples(args, tokenizer)
++    
++    # ==================== ADD THIS SECTION ====================
++    # Extract tools from requests if this is tool calling dataset
++    tools = None
++    tool_choice = None
++    if args.dataset_name == "tool_calling" and len(input_requests) > 0:
++        first_request = input_requests[0]
++        if (first_request.multi_modal_data and 
++            isinstance(first_request.multi_modal_data, dict)):
++            tools = first_request.multi_modal_data.get("tools")
++            tool_choice = first_request.multi_modal_data.get("tool_choice")
++            print(f"\n=== DEBUG serve.py ===")
++            print(f"Extracted tools: {tools is not None}")
++            print(f"Number of tools: {len(tools) if tools else 0}")
++            print(f"Tool choice: {tool_choice}")
++            print("=" * 40) 
++            if tools:
++                print(f"\nTool calling enabled with {len(tools)} tools")
++                if hasattr(args, 'tool_subset') and args.tool_subset:
++                    print(f"Using tool subset: {', '.join(args.tool_subset)}\n")
++                
++                # Remove tools from multi_modal_data to avoid passing them twice
++                for request in input_requests:
++                    if (request.multi_modal_data and 
++                        isinstance(request.multi_modal_data, dict)):
++                        request.multi_modal_data = None
++    # ==================== END OF ADDITION ====================
++    
+     goodput_config_dict = check_goodput_args(args)
+ 
+     # Collect the sampling parameters.
+@@ -1222,6 +1256,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
+     if "temperature" not in sampling_params:
+         sampling_params["temperature"] = 0.0  # Default to greedy decoding.
+ 
++    # ==================== ADD THIS SECTION ====================
++    # Add tools to sampling_params if available
++    if tools:
++        sampling_params["tools"] = tools
++        if tool_choice:
++            sampling_params["tool_choice"] = tool_choice
++        print(f"\n=== DEBUG sampling_params ===")
++        print(f"sampling_params has tools: {'tools' in sampling_params}")
++        print(f"sampling_params has tool_choice: {'tool_choice' in sampling_params}")
++        print(f"sampling_params keys: {list(sampling_params.keys())}")
++        print(f"Number of tools in sampling_params: {len(sampling_params.get('tools', []))}")
++        print("=" * 40 + "\n")
++    # ==================== END OF ADDITION ====================
++
+     # Avoid GC processing "static" data - reduce pause times.
+     gc.collect()
+     gc.freeze()
+@@ -1289,6 +1337,20 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
+         result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
+         result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
+ 
++    # ==================== ADD THIS SECTION (OPTIONAL) ====================
++    # Add tool calling metadata to results
++    if args.dataset_name == "tool_calling":
++        result_json["dataset_type"] = "tool_calling"
++        if hasattr(args, 'tool_calling_input_tokens'):
++            result_json["tool_calling_input_tokens"] = args.tool_calling_input_tokens
++        if hasattr(args, 'tool_calling_output_tokens'):
++            result_json["tool_calling_output_tokens"] = args.tool_calling_output_tokens
++        if hasattr(args, 'tool_subset') and args.tool_subset:
++            result_json["tool_subset"] = args.tool_subset
++        if tools:
++            result_json["num_tools"] = len(tools)
++    # ==================== END OF ADDITION ====================
++
+     # Merge with benchmark result
+     result_json = {**result_json, **benchmark_result}
+ 
