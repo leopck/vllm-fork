@@ -590,7 +590,7 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         sample_variation = f"\n\nRequest ID: {1}. Please ensure your response is detailed and comprehensive."
         variation_tokens = len(tokenizer(sample_variation, add_special_tokens=False).input_ids)
 
-        prompts = self.create_tool_calling_prompts(input_tokens - variation_tokens, output_tokens)
+        prompts = self.create_tool_calling_prompts(tokenizer, input_tokens - variation_tokens, output_tokens)
         requests = []
         
         for i in range(num_requests):
