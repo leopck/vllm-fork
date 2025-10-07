@@ -483,7 +483,7 @@ The path forward requires collaboration among researchers, policymakers, industr
 
     def _get_prompt_templates(self) -> List[str]:
         """Get prompt templates without extra context."""
-        return  [
+        return [
             """Given the following extensive context about AI and technology:
 
 {context}
@@ -556,8 +556,7 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         template_no_context = template.replace("{context}", "")
         return len(tokenizer(template_no_context, add_special_tokens=False).input_ids)
 
-    def create_tool_calling_prompts(self,
-                                    vocab_size: int, 
+    def create_tool_calling_prompts(self, 
                                     tokenizer: PreTrainedTokenizerBase,
                                     input_tokens: int = 122880,
                                     output_tokens: int = 8192,
@@ -569,12 +568,7 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         for template in templates:
             template_tokens = self._calculate_template_tokens(template, tokenizer)
             context_tokens = input_tokens - template_tokens
-
-            if True:
-                long_context = self.generate_long_context(context_tokens, tokenizer)
-            else:
-                long_context = self.generate_long_context_random(context_tokens, vocab_size, tokenizer)
-
+            long_context = self.generate_long_context(context_tokens, tokenizer)
             prompt = template.format(context=long_context)
 
         prompts.append(prompt)
