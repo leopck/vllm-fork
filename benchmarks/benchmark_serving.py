@@ -662,6 +662,8 @@ def calculate_metrics(
     goodput_config_dict: dict[str, float],
 ) -> tuple[BenchmarkMetrics, list[int]]:
     actual_output_lens: list[int] = []
+    actual_tool_calls: list[list[str]] = []
+    actual_tool_calls_len: list[int] = []
     total_input = 0
     completed = 0
     good_completed = 0
@@ -698,8 +700,26 @@ def calculate_metrics(
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
+
+            # Tool call tracking
+            tool_calls = []
+            tool_call_prefix = '<tool_call>['
+            if outputs[i].generated_text.startswith(tool_call_prefix):
+                import re, json
+                # Find all tool calls inside <tool_call>[...]
+                matches = re.findall(r'(\{"id": "chatcmpl-tool-[^}]+?\}\})', outputs[i].generated_text)
+                for match in matches:
+                    try:
+                        tool_call = json.loads(match)
+                        tool_calls.append(tool_call)
+                    except Exception:
+                        continue
+            actual_tool_calls.append(tool_calls)
+            actual_tool_calls_len.append(len(tool_calls))
         else:
             actual_output_lens.append(0)
+            actual_tool_calls.append([])
+            actual_tool_calls_len.append(0)
 
     if goodput_config_dict:
         valid_metrics = []
@@ -766,8 +786,9 @@ def calculate_metrics(
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
         ],
     )
+    avg_tool_calls = np.mean(actual_tool_calls_len) if actual_tool_calls_len else 0.0
 
-    return metrics, actual_output_lens
+    return metrics, actual_output_lens, actual_tool_calls, actual_tool_calls_len, avg_tool_calls
 
 
 async def benchmark(
@@ -923,7 +944,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    metrics, actual_output_lens = calculate_metrics(
+    metrics, actual_output_lens, actual_tool_calls, actual_tool_calls_len, avg_tool_calls  = calculate_metrics(
         input_requests=input_requests,
         outputs=outputs,
         dur_s=benchmark_duration,
@@ -959,6 +980,18 @@ async def benchmark(
             "Total Token throughput (tok/s):", metrics.total_token_throughput
         )
     )
+    
+    # Print tool call statistics
+    print("{:<40} {:<10.2f}".format("Avg tool calls per output:", avg_tool_calls))
+    #print("{:<40} {}".format("Tool call counts per output:", actual_tool_calls_len))
+    # Print a sample of actual tool calls
+    #sample_tool_calls = [calls for calls in actual_tool_calls if calls]
+    #if sample_tool_calls:
+    #    print("\nSample actual tool calls (first 3 outputs with tool calls):")
+    #    for idx, calls in enumerate(sample_tool_calls[:3]):
+    #        print(f"Output {idx+1}: {calls}")
+    #else:
+    #    print("No tool calls detected in outputs.")
 
     result = {
         "duration": benchmark_duration,
@@ -975,6 +1008,9 @@ async def benchmark(
         "itls": [output.itl for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
+        "actual_tool_calls": actual_tool_calls,
+     #   "actual_tool_calls_len": actual_tool_calls_len,
+     #   "avg_tool_calls": avg_tool_calls,
     }
 
     def process_one_metric(
