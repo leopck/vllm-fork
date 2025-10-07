@@ -1297,7 +1297,7 @@ def main(args: argparse.Namespace):
             tools = [tool for tool in tools if tool["function"]["name"] in args.tool_subset]
         
         sampling_params["tools"] = tools
-        sampling_params["tool_choice"] = "required"
+        sampling_params["tool_choice"] = "auto"
         
         print(f"Tool calling enabled with {len(tools)} tools")
         if args.tool_subset:
