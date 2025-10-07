@@ -442,10 +442,8 @@ class ToolCallingDataset:
             }
         ]
 
-    def generate_long_context(self, target_tokens: int) -> str:
-        """Generate long context text to approximate target token count."""
-        # Rough approximation: 4 characters per token for English text
-        target_chars = target_tokens * 4
+    def generate_long_context(self, target_tokens: int, tokenizer: PreTrainedTokenizerBase) -> str:
+        """Generate long context text with precise token count control."""
         
         base_text = """The field of artificial intelligence has undergone remarkable transformations over the past decade, fundamentally reshaping how we understand machine learning, natural language processing, and automated reasoning systems. Large language models have emerged as particularly significant developments, demonstrating unprecedented capabilities in text generation, comprehension, and complex reasoning tasks across diverse domains including scientific research, creative writing, code generation, and analytical problem solving.
 
@@ -461,19 +459,34 @@ Looking toward the future, the trajectory of AI development suggests continued a
 
 The path forward requires collaboration among researchers, policymakers, industry leaders, and civil society organizations to ensure that AI development proceeds in ways that maximize benefits while minimizing risks. This includes investment in AI safety research, development of robust testing and evaluation methodologies, creation of inclusive stakeholder engagement processes, and establishment of international cooperation frameworks for addressing global challenges and opportunities presented by artificial intelligence technologies."""
         
-        # Repeat and truncate to approximate target length
-        repetitions = max(1, target_chars // len(base_text))
-        extended_text = (base_text * repetitions)[:target_chars]
+        # Calculate base text token count
+        base_tokens = len(tokenizer(base_text, add_special_tokens=False).input_ids)
+
+        if target_tokens <= base_tokens:
+            base_token_ids = tokenizer(base_text, add_special_tokens=False).input_ids[:target_tokens]
+            return tokenizer.decode(base_token_ids)
+        
+        # Repeat base prompt 
+        full_repetitions = target_tokens // base_tokens
+        remaining_tokens = target_tokens % base_tokens
+
+        extended_text = ""
+        for _ in range(full_repetitions):
+            extended_text += base_text
+        
+        if remaining_tokens > 0:
+            partial_token_ids = tokenizer(base_text, add_special_tokens=False).input_ids[:remaining_tokens]
+            partial_text = tokenizer.decode(partial_token_ids)
+            extended_text += partial_text
+
         return extended_text
 
-    def create_tool_calling_prompts(self, input_tokens: int = 122880, output_tokens: int = 8192) -> List[str]:
-        """Create diverse tool calling prompts with long context."""
-        long_context = self.generate_long_context(input_tokens - 1500)  # Reserve tokens for prompt structure
-        
-        prompts = [
-            f"""Given the following extensive context about AI and technology:
+    def _get_prompt_templates(self) -> List[str]:
+        """Get prompt templates without extra context."""
+        return  [
+            """Given the following extensive context about AI and technology:
 
-{long_context}
+{context}
 
 You are an advanced AI assistant with access to multiple tools. Based on the context above, please help me with a comprehensive weather analysis for Boston. Use your available tools to:
 1. Get current weather information for Boston
@@ -483,9 +496,9 @@ You are an advanced AI assistant with access to multiple tools. Based on the con
 
 Provide a thorough analysis demonstrating the full capabilities of your available tools.""",
 
-            f"""Context about artificial intelligence and technology:
+            """Context about artificial intelligence and technology:
 
-{long_context}
+{context}
 
 As an AI assistant with tool access, I need you to help with market analysis. Please:
 1. Get the current stock price for AAPL
@@ -496,9 +509,9 @@ As an AI assistant with tool access, I need you to help with market analysis. Pl
 
 Use multiple tools to provide comprehensive market insights.""",
 
-            f"""Here's extensive background on AI developments:
+            """Here's extensive background on AI developments:
 
-{long_context}
+{context}
 
 Help me with a technical analysis task using your available tools:
 1. Execute Python code to calculate fibonacci numbers up to 100
@@ -509,9 +522,9 @@ Help me with a technical analysis task using your available tools:
 
 Demonstrate your multi-tool capabilities for this complex request.""",
 
-            f"""Background context on technology trends:
+            """Background context on technology trends:
 
-{long_context}
+{context}
 
 I need assistance with a multi-faceted research project. Please use your tools to:
 1. Search for the latest developments in renewable energy
@@ -523,9 +536,9 @@ I need assistance with a multi-faceted research project. Please use your tools t
 
 Provide comprehensive analysis using all relevant tools.""",
 
-            f"""Extensive context on AI and technological advancement:
+            """Extensive context on AI and technological advancement:
 
-{long_context}
+{context}
 
 Help me analyze global cryptocurrency trends using your tools:
 1. Search for Bitcoin price trends and news
@@ -537,7 +550,34 @@ Help me analyze global cryptocurrency trends using your tools:
 
 Use multiple tools to provide thorough cryptocurrency market analysis."""
         ]
-        
+    
+    def _calculate_template_tokens(self, template: str, tokenizer: PreTrainedTokenizerBase) -> int:
+        """Calculate the token length of a template without the context placeholder."""
+        template_no_context = template.replace("{context}", "")
+        return len(tokenizer(template_no_context, add_special_tokens=False).input_ids)
+
+    def create_tool_calling_prompts(self,
+                                    vocab_size: int, 
+                                    tokenizer: PreTrainedTokenizerBase,
+                                    input_tokens: int = 122880,
+                                    output_tokens: int = 8192,
+                                    ) -> List[str]:
+        """Create diverse tool calling prompts with long context."""
+        templates = self._get_prompt_templates()
+        prompts = []
+
+        for template in templates:
+            template_tokens = self._calculate_template_tokens(template, tokenizer)
+            context_tokens = input_tokens - template_tokens
+
+            if True:
+                long_context = self.generate_long_context(context_tokens, tokenizer)
+            else:
+                long_context = self.generate_long_context_random(context_tokens, vocab_size, tokenizer)
+
+            prompt = template.format(context=long_context)
+
+        prompts.append(prompt)
         return prompts
 
     def sample(self, 
@@ -552,7 +592,11 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         if tool_subset:
             tools = [tool for tool in tools if tool["function"]["name"] in tool_subset]
         
-        prompts = self.create_tool_calling_prompts(input_tokens, output_tokens)
+        # Calculate variation suffix token length once - Approx
+        sample_variation = f"\n\nRequest ID: {1}. Please ensure your response is detailed and comprehensive."
+        variation_tokens = len(tokenizer(sample_variation, add_special_tokens=False).input_ids)
+
+        prompts = self.create_tool_calling_prompts(input_tokens - variation_tokens, output_tokens)
         requests = []
         
         for i in range(num_requests):
