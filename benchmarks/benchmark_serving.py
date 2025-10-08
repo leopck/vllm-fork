@@ -689,6 +689,40 @@ async def get_request(
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
 
+def extract_tool_calls(output: RequestFuncOutput):
+    tool_calls = []
+    if output.tool_call_chunks:
+        import json
+        tool_call_idx = -1
+        for chunk in output.tool_call_chunks:
+            try:
+                call_chunk = json.loads(chunk)
+                call_chunk = call_chunk[0]
+                if call_chunk["index"] != tool_call_idx:
+                    if tool_call_idx >= 0:
+                        print(f"----> streamed tool call index: {tool_call_idx}")
+                        pass
+                    tool_call_idx = call_chunk["index"]
+                    tool_calls.append(call_chunk)
+
+                if id := call_chunk.get("id"):
+                    print(f"\n---> streamed tool call id: {id}")
+                    pass
+            except Exception as e:
+                print(f"warning: failed to parse generated tool call chunk: {chunk} -- {e=}")
+    else:
+        tool_call_prefix = '<tool_call>['
+        if output.generated_text.startswith(tool_call_prefix):
+            import re, json
+            # Find all tool calls inside <tool_call>[...]
+            matches = re.findall(r'(\{"id": "chatcmpl-tool-[^}]+?\}\})', output.generated_text)
+            for match in matches:
+                try:
+                    tool_call = json.loads(match)
+                    tool_calls.append(tool_call)
+                except Exception:
+                    continue
+    return tool_calls
 
 def calculate_metrics(
     input_requests: list[SampleRequest],
@@ -740,18 +774,8 @@ def calculate_metrics(
             completed += 1
 
             # Tool call tracking
-            tool_calls = []
-            tool_call_prefix = '<tool_call>['
-            if outputs[i].generated_text.startswith(tool_call_prefix):
-                import re, json
-                # Find all tool calls inside <tool_call>[...]
-                matches = re.findall(r'(\{"id": "chatcmpl-tool-[^}]+?\}\})', outputs[i].generated_text)
-                for match in matches:
-                    try:
-                        tool_call = json.loads(match)
-                        tool_calls.append(tool_call)
-                    except Exception:
-                        continue
+            tool_calls = extract_tool_calls(outputs[i])
+            
             actual_tool_calls.append(tool_calls)
             actual_tool_calls_len.append(len(tool_calls))
         else:

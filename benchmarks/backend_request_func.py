@@ -47,6 +47,7 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    tool_call_chunks: list[str] = field(default_factory=list)
 
 
 async def async_request_tgi(
@@ -400,6 +401,7 @@ async def async_request_openai_chat_completions(
         output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
+        tool_calls_chunks = []
         ttft = 0.0
         st = time.perf_counter()
         most_recent_timestamp = st
@@ -433,6 +435,7 @@ async def async_request_openai_chat_completions(
                                 # Tool calling
                                 elif "tool_calls" in delta:
                                     text_piece = json.dumps(delta["tool_calls"], ensure_ascii=False)
+                                    tool_calls_chunks.append(text_piece)
 
                                 else:
                                     text_piece = ""
@@ -452,6 +455,7 @@ async def async_request_openai_chat_completions(
                             most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
+                    output.tool_call_chunks = tool_calls_chunks
                     output.success = True
                     output.latency = most_recent_timestamp - st
                 else:
