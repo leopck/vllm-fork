@@ -80,10 +80,23 @@ MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 # Tool Calling Dataset Class
 class ToolCallingDataset:
     """Dataset for benchmarking tool calling capabilities with configurable input/output lengths."""
-    
+
     def __init__(self, dataset_path: Optional[str] = None, random_seed: int = 0):
         self.random_seed = random_seed
         random.seed(random_seed)
+        self.tool_prompt_token_lengths  = {
+            "get_current_weather": 338,
+            "search_web": 309,
+            "calculate_math": 331,
+            "send_email": 378,
+            "create_calendar_event": 423,
+            "get_stock_price": 359,
+            "translate_text": 341,
+            "execute_code": 344,
+            "read_file": 358,
+            "analyze_sentiment": 333,
+            "get_news": 399,
+        }
         
     def get_comprehensive_tools(self):
         """Return comprehensive set of tool calling functions."""
@@ -444,7 +457,7 @@ class ToolCallingDataset:
 
     def generate_long_context(self, target_tokens: int, tokenizer: PreTrainedTokenizerBase) -> str:
         """Generate long context text with precise token count control."""
-        
+
         base_text = """The field of artificial intelligence has undergone remarkable transformations over the past decade, fundamentally reshaping how we understand machine learning, natural language processing, and automated reasoning systems. Large language models have emerged as particularly significant developments, demonstrating unprecedented capabilities in text generation, comprehension, and complex reasoning tasks across diverse domains including scientific research, creative writing, code generation, and analytical problem solving.
 
 These sophisticated neural networks, trained on vast corpora of textual data, exhibit emergent behaviors that extend far beyond simple pattern matching or statistical correlation. They demonstrate nuanced understanding of context, semantic relationships, pragmatic implications, and even subtle aspects of human communication such as humor, irony, and cultural references. The architectural innovations underlying these systems, including transformer mechanisms, attention layers, and sophisticated optimization techniques, have enabled models to process and generate coherent, contextually appropriate responses across extended conversations and complex multi-turn interactions.
@@ -483,6 +496,7 @@ The path forward requires collaboration among researchers, policymakers, industr
 
     def _get_prompt_templates(self) -> List[str]:
         """Get prompt templates without extra context."""
+
         return [
             """Given the following extensive context about AI and technology:
 
@@ -556,7 +570,7 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         template_no_context = template.replace("{context}", "")
         return len(tokenizer(template_no_context, add_special_tokens=False).input_ids)
 
-    def create_tool_calling_prompts(self, 
+    def create_tool_calling_prompts(self,
                                     tokenizer: PreTrainedTokenizerBase,
                                     input_tokens: int = 122880,
                                     output_tokens: int = 8192,
@@ -585,25 +599,38 @@ Use multiple tools to provide thorough cryptocurrency market analysis."""
         tools = self.get_comprehensive_tools()
         if tool_subset:
             tools = [tool for tool in tools if tool["function"]["name"] in tool_subset]
-        
+         
+        # Calculate tool calling prompt suffix
+        if tool_subset:
+            tool_prompt_token_len = sum([self.tool_prompt_token_lengths[tool["function"]["name"]] for tool in tools])
+        else:
+            # granite 3.3 and no --chat-template
+            tool_prompt_token_len = 2613 
+        print(f"Tool token len (prompt):", tool_prompt_token_len)
+
         # Calculate variation suffix token length once - Approx
         sample_variation = f"\n\nRequest ID: {1}. Please ensure your response is detailed and comprehensive."
         variation_tokens = len(tokenizer(sample_variation, add_special_tokens=False).input_ids)
-
-        prompts = self.create_tool_calling_prompts(tokenizer, input_tokens - variation_tokens, output_tokens)
-        requests = []
         
+        # tool_prompt_token_len can be ~ 2000 tok if 11 tools are used
+        actual_input_token = (
+                input_tokens - variation_tokens - tool_prompt_token_len
+                if input_tokens - variation_tokens - tool_prompt_token_len > 0
+                else input_tokens - variation_tokens
+        )
+        prompts = self.create_tool_calling_prompts(tokenizer, actual_input_token, output_tokens)
+        requests = []
         for i in range(num_requests):
             # Cycle through different prompt templates
             base_prompt = prompts[i % len(prompts)]
             
             # Add some variation to avoid identical requests
             variation_suffix = f"\n\nRequest ID: {i+1}. Please ensure your response is detailed and comprehensive."
+
             prompt = base_prompt + variation_suffix
-            
+
             # Calculate actual prompt length
             prompt_len = len(tokenizer(prompt, add_special_tokens=False).input_ids)
-            
             request = SampleRequest(
                 prompt=prompt,
                 prompt_len=prompt_len,
@@ -747,20 +774,24 @@ def calculate_metrics(
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
-
+            # if i < 1:
+            #     print(f">>>>>>> len(output): {output_len}")
+            #     print(f">>>>>>> outputs[i].generated_text: {outputs[i].generated_text}")
+            #     print(f">>>>>>> outputs[i]: {outputs[i]}")
+            # print(f">>>>>>> outputs[i].generated_text: {outputs[i].generated_text}")
             if not output_len:
                 # We use the tokenizer to count the number of output tokens
                 # for some serving backends instead of looking at
                 # len(outputs[i].itl) since multiple output tokens may be
                 # bundled together
                 # Note : this may inflate the output token count slightly
-                output_len = len(
-                    tokenizer(
-                        outputs[i].generated_text, add_special_tokens=False
-                    ).input_ids
-                )
+                output = tokenizer(outputs[i].generated_text, add_special_tokens=False).input_ids
+                # print(f">>>>>>> output: {output}")
+                # print(f">>>>>>> len(output): {len(output)}")
+
+                output_len = len(output)
             actual_output_lens.append(output_len)
-            total_input += input_requests[i].prompt_len
+            total_input += outputs[i].prompt_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
